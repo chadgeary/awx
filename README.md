@@ -17,7 +17,7 @@ chad@chadg.net
 # friendly_name, a valid domain name for registering lets encrypt web certificate e.g.:
 awx.chadg.net
 
-# web_port, the local port for awx to listen on - the HTTPS proxy will direct here )
+# web_port, the local port for awx to listen on - the HTTPS proxy will direct here ), e.g.:1
 8002
 
 # target
