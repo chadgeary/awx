@@ -2,7 +2,7 @@
 Ansible playbook to install AWX (pulled via git) then installed with an Apache HTTP proxy using auto-renewed Let's Encrypt web certificate.
 
 # Auth
-Admin's generated password is located in /opt/awx_credential
+Admin's generated password is located in /opt/awx/awx_credential
 
 # Requires
 - CentOS 7 or Ubuntu 18.04/20.04
