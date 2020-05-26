@@ -17,11 +17,16 @@ chad@chadg.net
 # friendly_name, a valid domain name for registering lets encrypt web certificate e.g.:
 awx.chadg.net
 
+# web_port, the local port for awx to listen on - the HTTPS proxy will direct here )
+8002
+
 # target
 the server targeted for the awx installation
+
 ```
 
 # Example
 ```
-ansible-playbook -i ~/inventory ansible-awx.yml --extra-vars '{"certbot_contact_email":"chad@chadg.net","friendly_name":"awx.chadg.net","target":"localhost"}'
+# Local deployment
+ansible-playbook awx.yml --extra-vars '{"certbot_contact_email":"chad@chadg.net","friendly_name":"awx.chadg.net","web_port":"8002","target":"localhost"}'
 ```

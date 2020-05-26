@@ -118,8 +118,8 @@
            <VirtualHost *:80>
             ServerName {{ friendly_name }}
             ServerAlias {{ friendly_name }}
-            ProxyPass / "http://127.0.0.1:8002/"
-            ProxyPassReverse / "http://127.0.0.1:8002/"
+            ProxyPass / "http://127.0.0.1:{{ web_port }}/"
+            ProxyPassReverse / "http://127.0.0.1:{{ web_port }}/"
             LogLevel debug
            </VirtualHost>
       when: certbot_done.stat.exists == false
@@ -182,11 +182,11 @@
               ldap.OPT_X_TLS_REQUIRE_CERT: False,
           }
 
-    - name: set http port 8002
+    - name: set http port 
       replace:
         path: /opt/awx/installer/inventory
         regexp: 'host_port=80$'
-        replace: 'host_port=8002'
+        replace: 'host_port={{ web_port }}'
 
     - name: docker enable / start
       systemd:
