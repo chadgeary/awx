@@ -1,0 +1,239 @@
+---
+- name: ansible-awx
+  hosts: '{{ target }}'
+  gather_facts: true
+  become: true
+  tasks:
+
+    - name: install epel (EL7)
+      yum:
+        update_cache: yes
+        state: latest
+        name: epel-release
+      when:
+        - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+
+    - name: yum packages (EL7)
+      yum:
+        state: latest
+        name:
+          - "@Development Tools"
+          - docker
+          - git
+          - httpd
+          - mod_ldap
+          - mod_ssl
+          - mod_proxy_html
+          - make
+          - nodejs
+          - npm
+          - policycoreutils-python
+          - python-augeas
+          - python2-devel
+          - python3
+          - python3-devel
+          - python3-pip
+      when:
+        - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+
+    - name: deb packages (Ubuntu)
+      apt:
+        state: latest
+        name:
+          - docker
+          - git
+          - apache2
+          - python3-augeas
+          - python3
+          - python3-pip
+          - python3-dev
+          - nodejs
+          - npm
+      when:
+        - ansible_os_family == 'Debian'
+
+    - name: pip3 packages
+      pip:
+        state: latest
+        executable: pip3
+        name:
+          - ansible
+          - boto
+          - botocore
+          - boto3
+          - certbot
+          - certbot-apache
+          - docker
+          - docker-compose
+          - selinux
+
+    - name: check friendly_name in httpd.conf (EL7)
+      shell: grep --quiet "{{ friendly_name }}" /etc/httpd/conf/httpd.conf
+      register: friendly_httpdconf
+      ignore_errors: yes
+      when:
+        - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+
+    - name: check friendly_name in httpd.conf (Ubuntu)
+      shell: grep --quiet "{{ friendly_name }}" /etc/apache2/sites-enabled/*.conf
+      register: friendly_httpdconf
+      ignore_errors: yes
+      when:
+        - (ansible_os_family == 'Debian')
+
+    - name: enable / start http service
+      systemd:
+        name: "{% if ansible_os_family == 'RedHat' %}httpd{% elif ansible_os_family == 'Debian' %}apache2{% endif %}"
+        state: started
+        enabled: yes
+
+    - name: check certbot generated
+      stat:
+        path: "/opt/awx/certbot.done"
+      ignore_errors: yes
+      register: certbot_done
+
+    - name: add sites-enabled path (EL7)
+      file:
+        state: directory
+        path: /etc/httpd/conf/sites-enabled
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: add sites-enabled to conf (EL7)
+      lineinfile:
+        path: /etc/httpd/conf/httpd.conf
+        line: 'IncludeOptional conf/sites-enabled/*.conf'
+
+    - name: httpd proxy to awx
+      blockinfile:
+        create: yes
+        owner: root
+        group: root
+        mode: '0644'
+        path: "{% if ansible_os_family == 'RedHat' %}/etc/httpd/conf/sites-enabled/{% elif ansible_os_family == 'Debian' %}/etc/apache2/sites-enabled/{% endif %}001-{{ friendly_name }}.conf"
+        insertafter: "  ServerName {{ friendly_name }}"
+        block: |
+           <VirtualHost *:80>
+            ServerName {{ friendly_name }}
+            ServerAlias {{ friendly_name }}
+            ProxyPass / "http://127.0.0.1:8002/"
+            ProxyPassReverse / "http://127.0.0.1:8002/"
+            LogLevel debug
+           </VirtualHost>
+      when: certbot_done.stat.exists == false
+
+    - name: enable proxy module
+      apache2_module:
+        state: present
+        name: proxy_http
+
+    - name: httpd restart
+      systemd:
+        name: "{% if ansible_os_family == 'RedHat' %}httpd{% elif ansible_os_family == 'Debian' %}apache2{% endif %}"
+        state: restarted
+     
+    - name: awx git clone
+      git:
+        repo: 'https://github.com/ansible/awx'
+        dest: /opt/awx
+        clone: yes
+        update: no
+
+    - name: check pass default
+      shell: grep --quiet 'rabbitmq_password=awxpass' /opt/awx/installer/inventory
+      register: pass_default
+      ignore_errors: yes
+
+    - name: generate pass when default
+      shell: |
+        # alphanumeric rand
+        GENERATED_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/")
+        # root read-only
+        umask 277
+        # /opt/awx_credential reference file
+        echo $GENERATED_PASSWORD > /opt/awx_credential
+        # rabbitmq
+        sed -i "s#rabbitmq_password=awxpass#rabbitmq_password=$GENERATED_PASSWORD#" /opt/awx/installer/inventory
+        # postgres
+        sed -i "s#pg_password=awxpass#pg_password=$GENERATED_PASSWORD#" /opt/awx/installer/inventory
+        # administrator
+        sed -i "s#admin_password=password#admin_password=$GENERATED_PASSWORD#" /opt/awx/installer/inventory
+      when: pass_default.rc == 0
+
+    - name: untrusted ldap ok and verbose logging
+      blockinfile:
+        path: /opt/awx/installer/roles/local_docker/templates/credentials.py.j2
+        block: |
+          LOGGING['handlers']['syslog'] = {
+              'level': 'DEBUG',
+              'filters': ['require_debug_false'],
+              'class': 'logging.handlers.SysLogHandler',
+              'address': '/dev/log',
+              'facility': 'local0',
+              'formatter': 'simple',
+          }
+          
+          LOGGING['loggers']['django_auth_ldap']['handlers'] = ['syslog']
+          LOGGING['loggers']['django_auth_ldap']['level'] = 'DEBUG'
+          
+          AUTH_LDAP_GLOBAL_OPTIONS = {
+              ldap.OPT_X_TLS_REQUIRE_CERT: False,
+          }
+
+    - name: set http port 8002
+      replace:
+        path: /opt/awx/installer/inventory
+        regexp: 'host_port=80$'
+        replace: 'host_port=8002'
+
+    - name: docker enable / start
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: disable selinux for awx docker
+      selinux:
+        state: permissive
+        policy: targeted
+      when:
+        - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+
+    - name: install awx (EL7)
+      shell: |
+        /usr/local/bin/ansible-playbook -i inventory install.yml --extra-var "ansible_python_interpreter=/bin/python3"
+      args:
+        chdir: /opt/awx/installer/
+      when:
+        - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+
+    - name: install awx (Ubuntu)
+      shell: |
+        /usr/local/bin/ansible-playbook -i inventory install.yml --extra-var "ansible_python_interpreter=/usr/bin/python3"
+      args:
+        chdir: /opt/awx/installer/
+      when:
+        - (ansible_os_family == 'Debian')
+
+    - name: certbot apply
+      shell: |
+        /usr/local/bin/certbot --apache --non-interactive --agree-tos --email {{ certbot_contact_email|quote }} --domains {{ friendly_name }} --redirect
+        touch /opt/certbot.done
+      when: certbot_done.stat.exists == false
+
+    - name: certbot auto renew cron, 4AM on the second day of the month
+      cron:
+        name: "certbot renew nextcloud"
+        minute: '00'
+        hour: '04'
+        day: '02'
+        job: "/usr/local/bin/certbot renew"
+        state: present
+        user: root
+
+    - name: httpd service restart
+      systemd:
+        name: "{% if ansible_os_family == 'RedHat' %}httpd{% elif ansible_os_family == 'Debian' %}apache2{% endif %}"
+        state: restarted
