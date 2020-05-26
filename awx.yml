@@ -20,10 +20,6 @@
           - "@Development Tools"
           - docker
           - git
-          - httpd
-          - mod_ldap
-          - mod_ssl
-          - mod_proxy_html
           - make
           - nodejs
           - npm
@@ -35,6 +31,17 @@
           - python3-pip
       when:
         - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+
+    - name: httpd packages (EL7) (LetsEncrypt)
+      yum:
+        state: latest
+        name:
+          - httpd
+          - mod_ldap
+          - mod_ssl
+          - mod_proxy_html
+      when:
+        - le_enable|bool == True
 
     - name: deb packages (Ubuntu)
       apt:
@@ -51,6 +58,15 @@
           - npm
       when:
         - ansible_os_family == 'Debian'
+
+    - name: deb packages (Ubuntu) (LetsEncrypt)
+      apt:
+        state: latest
+        name:
+          - apache2
+      when:
+        - ansible_os_family == 'Debian'
+        - le_enable|bool == True
 
     - name: pip3 packages
       pip:
@@ -73,6 +89,7 @@
       ignore_errors: yes
       when:
         - (ansible_os_family == 'RedHat' and ansible_distribution_major_version == "7")
+        - le_enable|bool == True
 
     - name: check friendly_name in httpd.conf (Ubuntu)
       shell: grep --quiet "{{ friendly_name }}" /etc/apache2/sites-enabled/*.conf
@@ -80,12 +97,15 @@
       ignore_errors: yes
       when:
         - (ansible_os_family == 'Debian')
+        - le_enable|bool == True
 
     - name: enable / start http service
       systemd:
         name: "{% if ansible_os_family == 'RedHat' %}httpd{% elif ansible_os_family == 'Debian' %}apache2{% endif %}"
         state: started
         enabled: yes
+      when:
+        - le_enable|bool == True
 
     - name: check certbot generated
       stat:
@@ -100,11 +120,15 @@
         owner: root
         group: root
         mode: '0755'
+      when:
+        - le_enable|bool == True
 
     - name: add sites-enabled to conf (EL7)
       lineinfile:
         path: /etc/httpd/conf/httpd.conf
         line: 'IncludeOptional conf/sites-enabled/*.conf'
+      when:
+        - le_enable|bool == True
 
     - name: httpd proxy to awx
       blockinfile:
@@ -122,17 +146,23 @@
             ProxyPassReverse / "http://127.0.0.1:{{ web_port }}/"
             LogLevel debug
            </VirtualHost>
-      when: certbot_done.stat.exists == false
+      when:
+        - certbot_done.stat.exists == false
+        - le_enable|bool == True
 
     - name: enable proxy module
       apache2_module:
         state: present
         name: proxy_http
+      when:
+        - le_enable|bool == True
 
     - name: httpd restart
       systemd:
         name: "{% if ansible_os_family == 'RedHat' %}httpd{% elif ansible_os_family == 'Debian' %}apache2{% endif %}"
         state: restarted
+      when:
+        - le_enable|bool == True
      
     - name: awx git clone
       git:
@@ -142,25 +172,36 @@
         update: no
 
     - name: check pass default
-      shell: grep --quiet 'rabbitmq_password=awxpass' /opt/awx/installer/inventory
+      shell: grep --quiet 'admin_password=password' /opt/awx/installer/inventory
       register: pass_default
       ignore_errors: yes
 
     - name: generate pass when default
       shell: |
         # alphanumeric rand
-        GENERATED_PASSWORD=$(openssl rand -base64 16 | tr -d "=+/")
-        # root read-only
-        umask 277
+        GENERATED_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c -10)
         # /opt/awx_credential reference file
-        echo $GENERATED_PASSWORD > /opt/awx_credential
-        # rabbitmq
-        sed -i "s#rabbitmq_password=awxpass#rabbitmq_password=$GENERATED_PASSWORD#" /opt/awx/installer/inventory
-        # postgres
-        sed -i "s#pg_password=awxpass#pg_password=$GENERATED_PASSWORD#" /opt/awx/installer/inventory
-        # administrator
-        sed -i "s#admin_password=password#admin_password=$GENERATED_PASSWORD#" /opt/awx/installer/inventory
+        echo $GENERATED_PASSWORD > /opt/awx/admin_password
       when: pass_default.rc == 0
+
+    - name: gather password
+      shell: |
+        cat /opt/awx/admin_password
+      register: admin_password
+      when: pass_default.rc == 0
+      
+    - name: set admin password
+      lineinfile:
+        path: /opt/awx/installer/inventory
+        regexp: '^admin_password=password$'
+        line: "admin_password={{ admin_password.stdout }}"
+      when: pass_default.rc == 0
+
+    - name: set http port
+      replace:
+        path: /opt/awx/installer/inventory
+        regexp: 'host_port=80$'
+        replace: 'host_port={{ web_port }}'
 
     - name: untrusted ldap ok and verbose logging
       blockinfile:
@@ -181,12 +222,6 @@
           AUTH_LDAP_GLOBAL_OPTIONS = {
               ldap.OPT_X_TLS_REQUIRE_CERT: False,
           }
-
-    - name: set http port 
-      replace:
-        path: /opt/awx/installer/inventory
-        regexp: 'host_port=80$'
-        replace: 'host_port={{ web_port }}'
 
     - name: docker enable / start
       systemd:
@@ -220,8 +255,10 @@
     - name: certbot apply
       shell: |
         /usr/local/bin/certbot --apache --non-interactive --agree-tos --email {{ certbot_contact_email|quote }} --domains {{ friendly_name }} --redirect
-        touch /opt/certbot.done
-      when: certbot_done.stat.exists == false
+        touch /opt/awx/certbot.done
+      when: 
+        - certbot_done.stat.exists == false
+        - le_enable|bool == True
 
     - name: certbot auto renew cron, 4AM on the second day of the month
       cron:
@@ -232,8 +269,12 @@
         job: "/usr/local/bin/certbot renew"
         state: present
         user: root
+      when:
+        - le_enable|bool == True
 
     - name: httpd service restart
       systemd:
         name: "{% if ansible_os_family == 'RedHat' %}httpd{% elif ansible_os_family == 'Debian' %}apache2{% endif %}"
         state: restarted
+      when:
+        - le_enable|bool == True
